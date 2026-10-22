@@ -1,0 +1,257 @@
+
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agente de Órdenes de Compra SAP</title>
+  <style>
+    :root {
+      font-family: Inter, system-ui, Arial, sans-serif;
+      color: #172033;
+      background: #f3f5f9;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header {
+      background: #102b46;
+      color: white;
+      padding: 22px max(20px, calc((100% - 1100px) / 2));
+    }
+    header h1 { margin: 0 0 6px; font-size: 23px; }
+    header p { margin: 0; color: #c9d7e5; font-size: 14px; }
+    main {
+      max-width: 1100px;
+      margin: 26px auto;
+      padding: 0 18px;
+      display: grid;
+      grid-template-columns: 310px 1fr;
+      gap: 20px;
+    }
+    section {
+      background: white;
+      border: 1px solid #e0e5ed;
+      border-radius: 14px;
+      padding: 20px;
+      min-width: 0;
+    }
+    h2 { margin: 0 0 16px; font-size: 17px; }
+    label { display: block; font-size: 13px; margin-bottom: 8px; }
+    select, button {
+      width: 100%;
+      padding: 12px;
+      border-radius: 8px;
+      font: inherit;
+    }
+    select { border: 1px solid #cbd3df; background: white; }
+    button {
+      border: 0;
+      cursor: pointer;
+      background: #1769aa;
+      color: white;
+      font-weight: 600;
+      margin-top: 12px;
+    }
+    button:disabled { opacity: .55; cursor: wait; }
+    .muted { color: #68758a; font-size: 13px; line-height: 1.5; }
+    .status {
+      padding: 12px;
+      border-radius: 8px;
+      background: #f1f5f9;
+      margin: 14px 0;
+      font-size: 14px;
+    }
+    .good { background: #e8f7ed; color: #176534; }
+    .bad { background: #fff0ee; color: #a52b20; }
+    .item { padding: 12px 0; border-bottom: 1px solid #edf0f4; }
+    .item:last-child { border-bottom: 0; }
+    .key { color: #68758a; font-size: 12px; margin-bottom: 4px; }
+    .value { font-size: 14px; overflow-wrap: anywhere; }
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font: 13px/1.5 ui-monospace, Consolas, monospace;
+      background: #f6f8fb;
+      border-radius: 8px;
+      padding: 14px;
+    }
+    @media (max-width: 720px) {
+      main { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Agente de Órdenes de Compra SAP</h1>
+    <p>Preparación y validación de solicitudes · SAP simulado</p>
+  </header>
+
+  <main>
+    <section>
+      <h2>Casos de prueba</h2>
+      <label for="caso">Selecciona una solicitud</label>
+      <select id="caso">
+        <option value="">Cargando casos...</option>
+      </select>
+      <button id="cargar">Cargar solicitud</button>
+      <button id="validar">Ejecutar validación</button>
+      <p class="muted">
+        Esta interfaz ejecuta el validador del backend. La creación de
+        órdenes y el agente conversacional se integrarán en la siguiente etapa.
+      </p>
+      <div id="estado" class="status">Conectando con el servidor...</div>
+    </section>
+
+    <section>
+      <h2>Detalle de la solicitud</h2>
+      <div id="detalle" class="muted">
+        Selecciona un caso para consultar sus datos.
+      </div>
+      <h2 style="margin-top:24px">Resultado de validación</h2>
+      <div id="resultado" class="muted">
+        Ejecuta la validación para ver bloqueos y observaciones.
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const selector = document.getElementById("caso");
+    const estado = document.getElementById("estado");
+    const detalle = document.getElementById("detalle");
+    const resultado = document.getElementById("resultado");
+    const cargarBtn = document.getElementById("cargar");
+    const validarBtn = document.getElementById("validar");
+
+    function campo(nombre, valor) {
+      const fila = document.createElement("div");
+      fila.className = "item";
+
+      const clave = document.createElement("div");
+      clave.className = "key";
+      clave.textContent = nombre;
+
+      const contenido = document.createElement("div");
+      contenido.className = "value";
+      contenido.textContent = valor ?? "No informado";
+
+      fila.append(clave, contenido);
+      return fila;
+    }
+
+    async function api(url, opciones = {}) {
+      const respuesta = await fetch(url, opciones);
+      const datos = await respuesta.json();
+      if (!respuesta.ok || datos.ok === false) {
+        throw new Error(datos.error || "Error de comunicación con el servidor.");
+      }
+      return datos;
+    }
+
+    async function cargarCasos() {
+      try {
+        const datos = await api("/api/casos");
+        selector.replaceChildren();
+
+        for (const id of datos.casos) {
+          const opcion = document.createElement("option");
+          opcion.value = id;
+          opcion.textContent = id;
+          selector.append(opcion);
+        }
+
+        estado.textContent = `${datos.casos.length} casos encontrados`;
+        estado.className = "status good";
+        if (datos.casos.length) await cargarCaso();
+      } catch (error) {
+        estado.textContent = error.message;
+        estado.className = "status bad";
+      }
+    }
+
+    async function cargarCaso() {
+      if (!selector.value) return;
+
+      try {
+        estado.textContent = "Cargando solicitud...";
+        const datos = await api("/api/casos/" + selector.value);
+        const s = datos.solicitud;
+
+        detalle.replaceChildren(
+          campo("Solicitud", s.solicitud_id),
+          campo("Proveedor", s.proveedor_nombre),
+          campo("NIT", s.proveedor_nit),
+          campo("Centro de costo", s.centro_costo),
+          campo("Subárea", s.subarea),
+          campo("Cantidad", s.cantidad),
+          campo("Valor unitario", s.valor_unitario),
+          campo("Total", `${s.valor_total} ${s.moneda}`),
+          campo("Fecha de solicitud", s.fecha_solicitud),
+          campo("IVA", s.indicador_iva),
+          campo("Condiciones de pago", s.condiciones_pago)
+        );
+
+        resultado.textContent = "Solicitud cargada. Ejecuta la validación.";
+        estado.textContent = `Caso ${datos.id} cargado`;
+        estado.className = "status good";
+      } catch (error) {
+        estado.textContent = error.message;
+        estado.className = "status bad";
+      }
+    }
+
+    async function validarCaso() {
+      if (!selector.value) return;
+
+      validarBtn.disabled = true;
+      resultado.textContent = "Validando...";
+      try {
+        const datos = await api(
+          "/api/casos/" + selector.value + "/validar",
+          { method: "POST" }
+        );
+        const r = datos.resultado;
+        resultado.replaceChildren();
+
+        const resumen = document.createElement("div");
+        resumen.className = "status " + (r.valida ? "good" : "bad");
+        resumen.textContent = r.valida
+          ? "Sin errores bloqueantes en las reglas implementadas."
+          : "La solicitud tiene errores bloqueantes.";
+        resultado.append(resumen);
+
+        for (const [titulo, lista] of [
+          ["Errores", r.errores || []],
+          ["Advertencias", r.advertencias || []],
+          ["Observaciones", r.observaciones || []]
+        ]) {
+          const encabezado = document.createElement("h3");
+          encabezado.textContent = titulo;
+          resultado.append(encabezado);
+
+          if (!lista.length) {
+            resultado.append(campo("Resultado", "Ninguno"));
+          } else {
+            for (const mensaje of lista) {
+              resultado.append(campo(titulo, mensaje));
+            }
+          }
+        }
+
+        estado.textContent = "Validación ejecutada";
+        estado.className = "status good";
+      } catch (error) {
+        resultado.textContent = error.message;
+        estado.textContent = "No fue posible validar";
+        estado.className = "status bad";
+      } finally {
+        validarBtn.disabled = false;
+      }
+    }
+
+    cargarBtn.addEventListener("click", cargarCaso);
+    selector.addEventListener("change", cargarCaso);
+    validarBtn.addEventListener("click", validarCaso);
+    cargarCasos();
+  </script>
+</body>
+</html>
