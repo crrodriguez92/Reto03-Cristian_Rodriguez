@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "rootDir": ".",
+    "outDir": "dist",
+    "strict": true, //obliga a escribir código
+    "esModuleInterop": true,
+    "resolveJsonModule": true, //facilita importar archivos a formato JSON
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*.ts", "demo.ts"],
+  "exclude": ["node_modules", "dist", "out"]
+}
