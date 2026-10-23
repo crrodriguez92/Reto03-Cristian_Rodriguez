@@ -16,6 +16,7 @@ function leerJson(ruta: string): unknown {
   return JSON.parse(readFileSync(ruta, "utf8"));
 }
 
+// Verifica que el servidor esté disponible.
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "reto-03" });
 });
@@ -40,12 +41,15 @@ app.get("/api/casos", (_req, res) => {
   }
 });
 
-// Devuelve los datos del caso seleccionado.
+// Devuelve la solicitud, la aprobación y las evidencias disponibles.
 app.get("/api/casos/:id", (req, res) => {
   const id = req.params.id;
 
   if (!/^sol-\d{3}$/.test(id)) {
-    res.status(400).json({ ok: false, error: "Identificador inválido." });
+    res.status(400).json({
+      ok: false,
+      error: "Identificador inválido.",
+    });
     return;
   }
 
@@ -55,16 +59,19 @@ app.get("/api/casos/:id", (req, res) => {
     const solicitud = leerJson(join(carpeta, "solicitud.json"));
     const aprobacion = leerJson(join(carpeta, "aprobacion.json"));
 
+    const cotizacionPath = join(carpeta, "cotizacion.txt");
+    const facturaPath = join(carpeta, "factura.txt");
+
     res.json({
       ok: true,
       id,
       solicitud,
       aprobacion,
-      cotizacion: existsSync(join(carpeta, "cotizacion.txt"))
-        ? readFileSync(join(carpeta, "cotizacion.txt"), "utf8")
+      cotizacion: existsSync(cotizacionPath)
+        ? readFileSync(cotizacionPath, "utf8")
         : null,
-      factura: existsSync(join(carpeta, "factura.txt"))
-        ? readFileSync(join(carpeta, "factura.txt"), "utf8")
+      factura: existsSync(facturaPath)
+        ? readFileSync(facturaPath, "utf8")
         : null,
     });
   } catch {
@@ -75,12 +82,15 @@ app.get("/api/casos/:id", (req, res) => {
   }
 });
 
-// Ejecuta el validador existente con los datos originales.
+// Ejecuta el validador con la solicitud, aprobación y evidencias disponibles.
 app.post("/api/casos/:id/validar", (req, res) => {
   const id = req.params.id;
 
   if (!/^sol-\d{3}$/.test(id)) {
-    res.status(400).json({ ok: false, error: "Identificador inválido." });
+    res.status(400).json({
+      ok: false,
+      error: "Identificador inválido.",
+    });
     return;
   }
 
@@ -89,7 +99,18 @@ app.post("/api/casos/:id/validar", (req, res) => {
   try {
     const solicitud = leerJson(join(carpeta, "solicitud.json"));
     const aprobacion = leerJson(join(carpeta, "aprobacion.json"));
-    const resultado = validarSolicitud(solicitud, aprobacion);
+
+    const cotizacionPath = join(carpeta, "cotizacion.txt");
+    const facturaPath = join(carpeta, "factura.txt");
+
+    const resultado = validarSolicitud(solicitud, aprobacion, {
+      cotizacion: existsSync(cotizacionPath)
+        ? readFileSync(cotizacionPath, "utf8")
+        : null,
+      factura: existsSync(facturaPath)
+        ? readFileSync(facturaPath, "utf8")
+        : null,
+    });
 
     res.json({ ok: true, resultado });
   } catch {

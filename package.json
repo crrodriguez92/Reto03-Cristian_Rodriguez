@@ -6,6 +6,7 @@
     "dev": "tsx watch src/server.ts",
     "demo": "tsx demo.ts",
     "build": "tsc",
+    "test": "tsx src/tools/oc.rules.test.ts",
     "start": "node dist/src/server.js"
   },
   "keywords": [],

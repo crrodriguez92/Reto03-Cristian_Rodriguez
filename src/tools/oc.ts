@@ -3,20 +3,16 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
 
-// ============================================================
-// 1. ESQUEMAS DE VALIDACIÓN
-// ============================================================
-
 const SolicitudSchema = z.object({
   solicitud_id: z.string().min(1),
   proveedor_nombre: z.string().min(1),
-  proveedor_nit: z.string().min(1),
+  proveedor_nit: z.string().optional(),
   centro_costo: z.string().min(1),
   subarea: z.string().min(1),
   cantidad: z.number().positive(),
   valor_unitario: z.number().nonnegative(),
   valor_total: z.number().nonnegative(),
-  moneda: z.string().min(1),
+  moneda: z.enum(["COP", "USD"]),
   indicador_iva: z.string().optional(),
   condiciones_pago: z.string().optional(),
   fecha_solicitud: z.string().min(1),
@@ -24,10 +20,8 @@ const SolicitudSchema = z.object({
 
 const AprobacionSchema = z.object({
   de: z.string().email(),
-  // Se valida como texto porque algunos fixtures contienen
-  // caracteres Unicode en la dirección del destinatario.
   para: z.string().min(1),
-  cc: z.array(z.string()),
+  cc: z.array(z.string()).optional().default([]),
   fecha: z.string().min(1),
   asunto: z.string(),
   cuerpo: z.string(),
@@ -35,10 +29,6 @@ const AprobacionSchema = z.object({
 
 type Solicitud = z.infer<typeof SolicitudSchema>;
 type Aprobacion = z.infer<typeof AprobacionSchema>;
-
-// ============================================================
-// 2. TIPOS DE LOS MAESTROS
-// ============================================================
 
 interface Proveedor {
   codigo_sap: string;
@@ -74,29 +64,24 @@ interface CondicionPago {
   dias: number;
 }
 
-// ============================================================
-// 3. LECTURA DE ARCHIVOS JSON
-// ============================================================
-
-function leerJson<T>(ruta: string): T {
-  const contenido = readFileSync(
-    resolve(process.cwd(), ruta),
-    "utf8"
-  );
-
-  return JSON.parse(contenido) as T;
+export interface OpcionesValidacion {
+  cotizacion?: string | null;
+  factura?: string | null;
+  confirmado?: boolean;
+  confirmadoPor?: string;
 }
-
-// ============================================================
-// 4. CONTRATO DEL RESULTADO
-// ============================================================
 
 export interface ResultadoValidacion {
   solicitud_id: string;
   valida: boolean;
+  apta: boolean;
   errores: string[];
+  bloqueos: string[];
   advertencias: string[];
+  confirmaciones: string[];
   observaciones: string[];
+  derivados: Record<string, string>;
+  retroactiva: boolean;
   proveedor?: Proveedor;
   centroCosto?: CentroCosto;
   aprobador?: Aprobador;
@@ -104,244 +89,296 @@ export interface ResultadoValidacion {
   condicionPago?: CondicionPago;
 }
 
-// ============================================================
-// 5. VALIDACIÓN DE LA SOLICITUD
-// ============================================================
+function leerJson<T>(ruta: string): T {
+  return JSON.parse(
+    readFileSync(resolve(process.cwd(), ruta), "utf8")
+  ) as T;
+}
+
+function fechaValida(valor: string): number | null {
+  const fecha = Date.parse(valor);
+  return Number.isNaN(fecha) ? null : fecha;
+}
+
+function extraerImporte(texto: string, etiqueta: RegExp): number | null {
+  const coincidencia = texto.match(etiqueta);
+  if (!coincidencia?.[1]) return null;
+
+  const importe = Number(
+    coincidencia[1].replace(/[.\s,]/g, "")
+  );
+
+  return Number.isFinite(importe) ? importe : null;
+}
+
+function extraerFecha(texto: string, etiqueta: RegExp): string | null {
+  return texto.match(etiqueta)?.[1] ?? null;
+}
 
 export function validarSolicitud(
   entrada: unknown,
-  evidenciaEntrada?: unknown
+  evidenciaEntrada?: unknown,
+  opciones: OpcionesValidacion = {}
 ): ResultadoValidacion {
-  const resultado = SolicitudSchema.safeParse(entrada);
+  const parseo = SolicitudSchema.safeParse(entrada);
 
-  if (!resultado.success) {
+  const errores: string[] = [];
+  const advertencias: string[] = [];
+  const confirmaciones: string[] = [];
+  const observaciones: string[] = [];
+  const derivados: Record<string, string> = {};
+  let retroactiva = false;
+
+  if (!parseo.success) {
+    const detalles = parseo.error.issues.map(
+      issue => `${issue.path.join(".")}: ${issue.message}`
+    );
+
     return {
       solicitud_id: "desconocida",
       valida: false,
-      errores: resultado.error.issues.map(
-        (issue) =>
-          `${issue.path.join(".")}: ${issue.message}`
-      ),
-      advertencias: [],
-      observaciones: [],
+      apta: false,
+      errores: detalles,
+      bloqueos: detalles,
+      advertencias,
+      confirmaciones,
+      observaciones,
+      derivados,
+      retroactiva,
     };
   }
 
-  const solicitud: Solicitud = resultado.data;
-  const errores: string[] = [];
-  const advertencias: string[] = [];
-  const observaciones: string[] = [];
+  const solicitud: Solicitud = parseo.data;
 
-  // Cargar maestros.
   const proveedores = leerJson<Proveedor[]>(
     "fixtures/maestros/proveedores.json"
   );
-
   const centros = leerJson<CentroCosto[]>(
     "fixtures/maestros/centros-costo.json"
   );
-
   const indicadores = leerJson<IndicadorIva[]>(
     "fixtures/maestros/indicadores-iva.json"
   );
-
   const condiciones = leerJson<CondicionPago[]>(
     "fixtures/maestros/condiciones-pago.json"
   );
 
-  // ----------------------------------------------------------
-  // RC1: el proveedor debe existir y estar activo.
-  // ----------------------------------------------------------
+  // RC1: identificar proveedor por NIT o nombre, sin ambigüedad.
+  const nit = solicitud.proveedor_nit?.replace(/\D/g, "");
+  const nombre = solicitud.proveedor_nombre.trim().toLowerCase();
 
-  const proveedor = proveedores.find(
-    (item) => item.nit === solicitud.proveedor_nit
+  const candidatos = proveedores.filter(p =>
+    nit
+      ? p.nit.replace(/\D/g, "") === nit
+      : p.nombre.trim().toLowerCase() === nombre
   );
 
-  if (!proveedor) {
+  let proveedor: Proveedor | undefined;
+
+  if (candidatos.length !== 1) {
     errores.push(
-      "RC1: el proveedor no existe en el maestro."
+      candidatos.length === 0
+        ? "RC1: el proveedor no existe en el maestro."
+        : "RC1: el proveedor es ambiguo; se requiere identificarlo inequívocamente."
     );
   } else {
+    proveedor = candidatos[0];
+
     if (!proveedor.activo) {
-      errores.push(
-        "RC1: el proveedor está inactivo."
-      );
+      errores.push("RC1: el proveedor está inactivo.");
     }
 
-    if (
-      proveedor.nombre.trim().toLowerCase() !==
-      solicitud.proveedor_nombre.trim().toLowerCase()
-    ) {
-      errores.push(
-        "El nombre del proveedor no coincide con el maestro."
-      );
+    if (proveedor.nombre.trim().toLowerCase() !== nombre) {
+      errores.push("RC1: el nombre del proveedor no coincide con el maestro.");
+    }
+
+    if (nit && proveedor.nit.replace(/\D/g, "") !== nit) {
+      errores.push("RC1: el NIT no coincide con el maestro.");
     }
   }
 
-  // ----------------------------------------------------------
-  // RC4: validar centro de costo y subárea.
-  // ----------------------------------------------------------
-
+  // RC4: centro de costo y subárea.
   const centroCosto = centros.find(
-    (item) =>
-      item.centro_costo === solicitud.centro_costo
+    c => c.centro_costo === solicitud.centro_costo
   );
 
   if (!centroCosto) {
-    errores.push(
-      "RC4: el centro de costo no existe."
-    );
-  } else if (
-    !centroCosto.subareas.includes(solicitud.subarea)
-  ) {
-    errores.push(
-      "RC4: la subárea no pertenece al centro de costo."
-    );
+    errores.push("RC4: el centro de costo no existe.");
+  } else if (!centroCosto.subareas.includes(solicitud.subarea)) {
+    errores.push("RC4: la subárea no pertenece al centro de costo.");
   }
 
-  // ----------------------------------------------------------
-  // RC2 y RC3: aprobación y tope del aprobador.
-  // ----------------------------------------------------------
-
+  // RC2 y RC3: evidencia, autorización y límite.
   let aprobador: Aprobador | undefined;
+  let evidencia: Aprobacion | undefined;
 
-  if (evidenciaEntrada === undefined ||
-      evidenciaEntrada === null) {
-    errores.push(
-      "RC2: no se suministró evidencia de aprobación."
-    );
+  if (evidenciaEntrada == null) {
+    errores.push("RC2: no se suministró evidencia de aprobación.");
   } else {
-    const evidenciaResultado =
-      AprobacionSchema.safeParse(evidenciaEntrada);
+    const parseoEvidencia = AprobacionSchema.safeParse(evidenciaEntrada);
 
-    if (!evidenciaResultado.success) {
-      errores.push(
-        "RC2: la evidencia de aprobación tiene un formato inválido."
-      );
+    if (!parseoEvidencia.success) {
+      errores.push("RC2: la evidencia de aprobación tiene un formato inválido.");
     } else {
-      const evidencia: Aprobacion =
-        evidenciaResultado.data;
+      evidencia = parseoEvidencia.data;
 
-      // Comprobar que el cuerpo contenga la palabra requerida.
       if (!/\baprobado\b/i.test(evidencia.cuerpo)) {
-        errores.push(
-          "RC2: la evidencia no contiene una aprobación válida."
-        );
+        errores.push("RC2: la evidencia no contiene una aprobación válida.");
       }
 
-      // El remitente debe estar autorizado para este centro.
       if (!centroCosto) {
-        errores.push(
-          "RC2: no se puede verificar al aprobador porque el centro de costo no es válido."
-        );
+        errores.push("RC2: no se puede verificar al aprobador sin un centro de costo válido.");
       } else {
         aprobador = centroCosto.aprobadores.find(
-          (item) =>
-            item.email.toLowerCase() ===
-            evidencia.de.toLowerCase()
+          a => a.email.toLowerCase() === evidencia!.de.toLowerCase()
         );
 
         if (!aprobador) {
+          errores.push("RC2: el remitente no está autorizado para este centro de costo.");
+        } else if (solicitud.valor_total > aprobador.tope) {
           errores.push(
-            "RC2: el remitente no está autorizado para aprobar en este centro de costo."
+            `RC3: el total (${solicitud.valor_total}) supera el tope del aprobador (${aprobador.tope}).`
           );
-        } else {
-          // RC3: el importe no puede superar el tope.
-          if (solicitud.valor_total > aprobador.tope) {
-            errores.push(
-              `RC3: el total (${solicitud.valor_total}) ` +
-              `supera el tope del aprobador (${aprobador.tope}).`
-            );
-          }
         }
       }
     }
   }
 
-  // ----------------------------------------------------------
-  // RC6: indicador de IVA y valor por defecto.
-  // ----------------------------------------------------------
+  // RC5: comparar el total cotizado con el solicitado.
+  if (!opciones.cotizacion?.trim()) {
+    confirmaciones.push(
+      "RC5: no hay cotización disponible; se requiere confirmación humana."
+    );
+  } else {
+    const totalCotizado = extraerImporte(
+      opciones.cotizacion,
+      /TOTAL\s*\(?.*?\)?[^\n]*?:?\s*(?:COP|USD)\s*([\d.,]+)/i
+    );
 
-  const ivaOmitido =
-    solicitud.indicador_iva === undefined ||
-    solicitud.indicador_iva.trim() === "";
+    if (totalCotizado === null) {
+      errores.push("RC5: no fue posible identificar el total de la cotización.");
+    } else {
+      const diferencia = solicitud.valor_total === 0
+        ? (totalCotizado === 0 ? 0 : 100)
+        : Math.abs(totalCotizado - solicitud.valor_total) /
+          solicitud.valor_total * 100;
 
+      if (diferencia > 2) {
+        confirmaciones.push(
+          `RC5: la cotización (${totalCotizado}) difiere ${diferencia.toFixed(2)} % del valor solicitado (${solicitud.valor_total}); se requiere confirmación humana.`
+        );
+      }
+    }
+  }
+
+  // RC6: IVA predeterminado y confirmación humana.
+  const ivaOmitido = !solicitud.indicador_iva?.trim();
   const codigoIva = ivaOmitido
     ? proveedor?.indicador_iva_default
     : solicitud.indicador_iva;
 
-  const indicadorIva = codigoIva
-    ? indicadores.find(
-        (item) => item.codigo === codigoIva
-      )
-    : undefined;
+  const indicadorIva = indicadores.find(i => i.codigo === codigoIva);
 
   if (!indicadorIva) {
-    errores.push(
-      "RC6: el indicador de IVA no existe o no se pudo determinar."
-    );
+    errores.push("RC6: el indicador de IVA no existe o no se pudo determinar.");
   } else if (ivaOmitido) {
-    advertencias.push(
-      `RC6: se propone el indicador de IVA ${indicadorIva.codigo} ` +
-      `(${indicadorIva.descripcion}) por defecto del proveedor. ` +
-      "Se requiere confirmación humana."
+    derivados.indicador_iva = indicadorIva.codigo;
+    confirmaciones.push(
+      `RC6: se propone IVA ${indicadorIva.codigo} (${indicadorIva.descripcion}); requiere confirmación humana.`
     );
   }
 
-  // ----------------------------------------------------------
-  // RC7: condiciones de pago y valor por defecto.
-  // ----------------------------------------------------------
-
-  const pagoOmitido =
-    solicitud.condiciones_pago === undefined ||
-    solicitud.condiciones_pago.trim() === "";
-
+  // RC7: condiciones de pago predeterminadas; solo informar.
+  const pagoOmitido = !solicitud.condiciones_pago?.trim();
   const codigoPago = pagoOmitido
     ? proveedor?.condiciones_pago_default
     : solicitud.condiciones_pago;
 
-  const condicionPago = codigoPago
-    ? condiciones.find(
-        (item) => item.codigo === codigoPago
-      )
-    : undefined;
+  const condicionPago = condiciones.find(c => c.codigo === codigoPago);
 
   if (!condicionPago) {
-    errores.push(
-      "RC7: las condiciones de pago no existen o no se pudieron determinar."
-    );
+    errores.push("RC7: las condiciones de pago no existen o no se pudieron determinar.");
   } else if (pagoOmitido) {
+    derivados.condiciones_pago = condicionPago.codigo;
     observaciones.push(
-      `RC7: se utilizarán las condiciones de pago ${condicionPago.codigo} ` +
-      `(${condicionPago.descripcion}), según el valor por defecto del proveedor.`
+      `RC7: se utilizarán las condiciones de pago ${condicionPago.codigo} (${condicionPago.descripcion}) por defecto del proveedor.`
     );
   }
 
-  // ----------------------------------------------------------
-  // RC10: cantidad × precio unitario = total, tolerancia de $1.
-  // ----------------------------------------------------------
+  // RC8: factura retroactiva.
+  if (opciones.factura?.trim()) {
+    const fechaFactura = extraerFecha(
+      opciones.factura,
+      /Fecha de emisi[oó]n:\s*(\d{4}-\d{2}-\d{2})/i
+    );
 
-  const totalCalculado =
-    solicitud.cantidad * solicitud.valor_unitario;
+    if (!fechaFactura || fechaValida(fechaFactura) === null) {
+      errores.push("RC8: no fue posible identificar una fecha de emisión válida en la factura.");
+    } else {
+      const fechaSolicitud = fechaValida(solicitud.fecha_solicitud);
 
-  if (
-    Math.abs(totalCalculado - solicitud.valor_total) > 1
-  ) {
+      if (fechaSolicitud === null) {
+        errores.push("RC8: la fecha de solicitud no es válida.");
+      } else if (fechaValida(fechaFactura)! < fechaSolicitud) {
+        retroactiva = true;
+        confirmaciones.push(
+          `RC8: la factura es retroactiva (${fechaFactura}), anterior a la solicitud (${solicitud.fecha_solicitud}); requiere confirmación humana y registro de control.`
+        );
+      }
+    }
+  }
+
+  // RC9: aprobación anterior a la solicitud.
+  if (evidencia) {
+    const fechaAprobacion = fechaValida(evidencia.fecha);
+    const fechaSolicitud = fechaValida(solicitud.fecha_solicitud);
+
+    if (fechaAprobacion === null || fechaSolicitud === null) {
+      errores.push("RC9: no fue posible validar las fechas de solicitud y aprobación.");
+    } else if (fechaAprobacion < fechaSolicitud) {
+      confirmaciones.push(
+        `RC9: la aprobación (${evidencia.fecha}) es anterior a la solicitud (${solicitud.fecha_solicitud}); requiere confirmación humana.`
+      );
+    }
+  }
+
+  // RC10: cantidad por precio unitario, tolerancia de una unidad monetaria.
+  const totalCalculado = solicitud.cantidad * solicitud.valor_unitario;
+
+  if (Math.abs(totalCalculado - solicitud.valor_total) > 1) {
     errores.push(
-      `RC10: el total informado (${solicitud.valor_total}) ` +
-      `no coincide con el calculado (${totalCalculado}).`
+      `RC10: el total informado (${solicitud.valor_total}) no coincide con el calculado (${totalCalculado}).`
     );
   }
 
-  // Una solicitud con errores no puede considerarse válida.
-  // Las advertencias requieren atención, pero no son errores
-  // bloqueantes por sí mismas.
+  if (opciones.confirmado) {
+    if (!opciones.confirmadoPor?.trim()) {
+      errores.push(
+        "Confirmación: debe indicarse quién autoriza las excepciones."
+      );
+    } else {
+      observaciones.push(
+        `Excepciones confirmadas por ${opciones.confirmadoPor.trim()}.`
+      );
+    }
+  }
+
+  const bloqueos = [...errores];
+  const apta = bloqueos.length === 0 && (
+    confirmaciones.length === 0 || opciones.confirmado === true
+  );
+
   return {
     solicitud_id: solicitud.solicitud_id,
-    valida: errores.length === 0,
+    valida: apta,
+    apta,
     errores,
+    bloqueos,
     advertencias,
+    confirmaciones,
     observaciones,
+    derivados,
+    retroactiva,
     proveedor,
     centroCosto,
     aprobador,
