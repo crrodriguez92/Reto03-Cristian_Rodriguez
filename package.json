@@ -1,12 +1,12 @@
 {
   "name": "reto-03",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "main": "index.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "demo": "tsx demo.ts",
     "build": "tsc",
-    "test": "tsx src/tools/oc.rules.test.ts",
+    "test": "tsx src/tools/oc.rules.test.ts && tsx src/tools/oc.test.ts && tsx src/tools/oc.negative.test.ts",
     "start": "node dist/src/server.js"
   },
   "keywords": [],
